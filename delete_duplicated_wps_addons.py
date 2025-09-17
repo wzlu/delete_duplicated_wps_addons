@@ -6,49 +6,119 @@ delete_duplicated_wps_addons.py
 
 import os
 import sys
+import shutil
+import argparse
+from packaging import version
 
 def get_newest_addon(filename_list):
-    if len(filename_list)==0:
-        raise Exception('get_newest_addon(filename_list): filename_list is empty')
-    main_name = filename_list[0][:filename_list[0].rfind('_')]
-    result = filename_list[0]
+    if not filename_list:
+        raise ValueError('get_newest_addon(filename_list): filename_list is empty')
+
+    newest_filename = filename_list[0]
     try:
-        for filename in filename_list:
-            v1 = list(map(int, result[result.rfind('_')+1:].split(".")))
-            v2 = list(map(int, filename[filename.rfind('_')+1:].split(".")))
-            if v1>=v2:
-                continue
-            else:
-                result = filename
-    except Exception as e:
-        print('------->' + result + '<------------')
-        print(e)
-    return result
+        max_version = version.parse(newest_filename.split('_')[-1])
+        for filename in filename_list[1:]:
+            current_version = version.parse(filename.split('_')[-1])
+            if current_version > max_version:
+                max_version = current_version
+                newest_filename = filename
+    except version.InvalidVersion as e:
+        print(f"Warning: Could not parse version for an addon. Skipping group. Error: {e}")
+        # Depending on desired behavior, you might want to return the first filename
+        # or handle it differently. For now, we print a warning and return the first.
+        return filename_list[0]
+    return newest_filename
 
-if not sys.platform.startswith('win'):
-    print('Only running on windows system')
-    sys.exit(1)
+def find_addon_path():
+    """Tries to find the WPS addons path by checking common locations."""
+    base_path = os.path.join(os.environ.get('APPDATA'), 'kingsoft', 'wps', 'addons')
 
-path = os.path.join(os.environ.get('APPDATA'), 'kingsoft','wps','addons','pool','win-i386')
-print('scanning path is:', path)
-if not os.path.exists(path):
-    print('path is not exist.')
-    sys.exit(1)
-filenames = os.listdir(path)
-filenames = [ filename for filename in filenames if os.path.isdir(path+os.sep+filename) ]
+    pool_dirs = ['pools', 'pool']
+    arch_dirs = ['win-x64', 'win-i386']
 
-main_names = list(set([ filename[:filename.rfind('_')] for filename in filenames]))
+    for pool in pool_dirs:
+        for arch in arch_dirs:
+            path = os.path.join(base_path, pool, arch)
+            if os.path.exists(path):
+                return path
+    return None
 
-newest_addon_list = [ get_newest_addon([filename for filename in filenames if filename.startswith(main_name+'_')]) for main_name in main_names ]
+def main():
+    """Main function to find and delete old addons."""
+    parser = argparse.ArgumentParser(description='Clean up old and duplicated WPS Office addons.')
+    parser.add_argument('--dry-run', action='store_true', help='Print which addons would be deleted without actually deleting them.')
+    parser.add_argument('-y', '--yes', action='store_true', help='Automatically answer yes to the confirmation prompt.')
+    args = parser.parse_args()
 
-for filename in filenames:
-    #print(filename)
-    main_name = filename[:filename.rfind('_')]
-    if filename not in newest_addon_list:
-        print('========================')
-        print('非最新版本:', filename)
-        print('其它版本文件包括：')
-        print([ oth_file for oth_file in filenames if oth_file.startswith(main_name+'_')])
-        print('其中最新版本为：', [ n_file for n_file in newest_addon_list if n_file.startswith(main_name+'_')])
-        print('删除' + filename + '...')
-        os.system('rd /s /q ' + path + os.sep + filename)
+    if not sys.platform.startswith('win'):
+        print('This script is intended for Windows only.')
+        sys.exit(1)
+
+    addon_path = find_addon_path()
+    if not addon_path:
+        print('Error: Could not find the WPS addons directory.')
+        sys.exit(1)
+
+    print(f'Scanning path: {addon_path}')
+
+    all_addons = [d for d in os.listdir(addon_path) if os.path.isdir(os.path.join(addon_path, d))]
+
+    addons_map = {}
+    for addon in all_addons:
+        try:
+            main_name = addon.rsplit('_', 1)[0]
+            if main_name not in addons_map:
+                addons_map[main_name] = []
+            addons_map[main_name].append(addon)
+        except IndexError:
+            print(f"Warning: Could not determine main name for '{addon}'. Skipping.")
+            continue
+
+    to_delete = []
+    for main_name, addon_list in addons_map.items():
+        if len(addon_list) <= 1:
+            continue
+
+        newest_addon = get_newest_addon(addon_list)
+        print(f"\nFound duplicates for '{main_name}':")
+        print(f"  All versions: {addon_list}")
+        print(f"  Newest version: {newest_addon}")
+
+        for addon in addon_list:
+            if addon != newest_addon:
+                to_delete.append(addon)
+
+    if not to_delete:
+        print("\nNo old addons found to delete.")
+        return
+
+    print("\nAddons to be deleted:")
+    for addon in to_delete:
+        print(f"  - {addon}")
+
+    if args.dry_run:
+        print("\n--dry-run mode is active. No files will be deleted.")
+        return
+
+    if not args.yes:
+        try:
+            confirm = input("\nDo you want to proceed with the deletion? (y/N): ")
+            if confirm.lower() != 'y':
+                print("Deletion cancelled by user.")
+                return
+        except KeyboardInterrupt:
+            print("\nDeletion cancelled by user.")
+            return
+
+    print("\nStarting deletion...")
+    for addon_to_delete in to_delete:
+        print(f"  Deleting old version: {addon_to_delete}")
+        try:
+            shutil.rmtree(os.path.join(addon_path, addon_to_delete))
+            print(f"  Successfully deleted {addon_to_delete}")
+        except (OSError, PermissionError) as e:
+            print(f"  Error: Could not delete {addon_to_delete}. It might be locked.")
+            print(f"    Details: {e}")
+
+if __name__ == '__main__':
+    main()
